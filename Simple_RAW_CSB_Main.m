@@ -43,6 +43,7 @@ RAW_Mode = 3;
 % mode 2: (proposed II) (Adaptation) distributed access (사용하지 않음)
 % mode 3: (Proposed III) 이름을 정하지 않은 (unnamed) 제안 기법
 % mode 4: Legacy RAW mode (based on IEEE 802.11ah std.)  i.e., slot_i = ( x + N_offset ) mod N_RAW
+% mode 5: (Proposed III+) mode 3 with adaptive fallback & smoothed TX probability
 
 Traffic_Surge_Mode = 3;
     % Mode 1: based on simple random distribution
@@ -356,29 +357,29 @@ if RAW_Mode == 2
 
 end
     
-if RAW_Mode == 3  % Proposed
+if RAW_Mode == 3 || RAW_Mode == 5  % Proposed family
     TX_Th = 0.5;  % not used longer
-    
-    Enable_TxWeight = 1; % 
-    
+
+    Enable_TxWeight = 1; %
+
     if Enable_TxWeight
-       
+
         Init_TxWeight = 1.0;  % Weightage Value
-              
+
         Max_TxWeight = 2.0; % Maximum Value of Weightage
         Min_TxWeight = 0.01; % minimum Value of Weightage
-       
+
         Dec_TxWeight = 0.3; % Decrement amount of Weightage
         Inc_TxWeight = 0.3; % Increment amount of Weightage
-        
+
         Prev_TxConfig = -1*ones(N_Node, 2);
         % 1st col: Previous TX_Prob attained from TX_LOG
         % 2nd col: Previous TxWeight Value
         % "-1" means initial state of each value.
-        
+
         On_Log_TxWeight = 1;
         if On_Log_TxWeight
-           
+
             Target_Node_Log_TxWeight = [2 5 10];
             Measure_Interval_Log_TxWeight = Net_Congestion_Measure_Interval;  % (slots);
             % (note) NetCongestionMeasure와 동일한 측정/조정 주기를 갖도록 함
@@ -390,13 +391,33 @@ if RAW_Mode == 3  % Proposed
             % 1st col: Time when measured
             % 2nd col: Temporal TxWeight
             % 3rd col: Temporal TxProb
-                                 
+
         end
     end
-    
-    
+
+
     Cnt_NoLog = zeros(N_Node,1);
-    
+    Cnt_Fallback = zeros(N_Node,1);
+
+    Enable_TXProb_Smoothing = 0;
+    TXProb_Smoothing_Factor = 0;
+    Enable_AdaptiveFallback = 0;
+    Fallback_Default_TX_Prob = 0;
+    Fallback_Weight = 0;
+    Fallback_Min_TX_Prob = 0;
+    Fallback_Max_TX_Prob = 1;
+
+    if RAW_Mode == 5
+        Enable_TXProb_Smoothing = 1;
+        TXProb_Smoothing_Factor = 0.5; % 0 -> disable smoothing, 1 -> keep previous TX prob
+
+        Enable_AdaptiveFallback = 1;
+        Fallback_Default_TX_Prob = 0.5;
+        Fallback_Weight = 0.5; % weight toward fallback metric when log is missing
+        Fallback_Min_TX_Prob = 0.01;
+        Fallback_Max_TX_Prob = 0.99;
+    end
+
     if On_Save_TX_Log == 2
         filename = sprintf('TX_LOG_TEST.mat');
     else
@@ -410,9 +431,9 @@ if RAW_Mode == 3  % Proposed
     if ~Mode_Net_Congestion_Measure
         error('RAW_MODE(3) should work with "Mode_Net_Congestion_Measure"!');
     end
-    
+
     Norm_TX_LOG = [ TX_LOG(:,1)/max(TX_LOG(:,1)) TX_LOG(:,2)/max(TX_LOG(:,2)) ];
-     
+
 
 end
 
@@ -703,134 +724,134 @@ while(i <= N_slot)
                    end
                end
                
-           elseif RAW_Mode == 3
-              
+           elseif RAW_Mode == 3 || RAW_Mode == 5
+
                List_Assigned_STA = zeros(N_RAW, N_STA);  % initialization, 0: non-assigned STA, 1+: assigned STA's AID
-               
+
                for j = 1:N_STA
-                   
+
                    if( Node.TX_Buffer(idx_STA(j)).Length > 0 )  % only STAs that have buffered frames should access RAWs.
-                       
+
                        if ~isempty(Net_Congestion_Measure(idx_STA(j)).CH_Util)
-                           
+
                            current_idx = length(Net_Congestion_Measure(idx_STA(j)).CH_Util);
                            Temp_Bin_CH_Usage =  ceil(Net_Congestion_Measure(idx_STA(j)).CH_Util(current_idx,2)/Bin_CH_Usage)*Bin_CH_Usage;
                            Temp_Bin_ACK = ceil(Net_Congestion_Measure(idx_STA(j)).N_ACK(current_idx,2)/Bin_N_ACK)*Bin_N_ACK;
 
                            Temp_Idx_TX_LOG = find(TX_LOG(:,1) == Temp_Bin_CH_Usage & TX_LOG(:,2) == Temp_Bin_ACK);
-                           
-                           
-                           if isempty(Temp_Idx_TX_LOG)
+                           Is_ExactMatch_TXLOG = ~isempty(Temp_Idx_TX_LOG);
+
+                           if ~Is_ExactMatch_TXLOG
                                disp('There is no corresponding data in TX_LOG!');
-                               Cnt_NoLog(idx_STA(j)) = Cnt_NoLog(idx_STA(j)) + 1; 
-                               
+                               Cnt_NoLog(idx_STA(j)) = Cnt_NoLog(idx_STA(j)) + 1;
+
                                EuclDist = sqrt( (Norm_TX_LOG(:,1) - Temp_Bin_CH_Usage/max(TX_LOG(:,1))).^2 + (Norm_TX_LOG(:,2) - Temp_Bin_ACK/max(TX_LOG(:,2))).^2);
-                               [minEuclDist, Temp_Idx_TX_LOG] = min(EuclDist);  
-                               
-                               %TX_Prob = TX_LOG(Temp_Idx_TX_LOG,11);
-                               
-%                                if TX_LOG(Temp_Idx_TX_LOG,11) >= rand % TX_Th
-%                                   List_Assigned_STA(ceil(N_RAW*rand), j) = idx_STA(j); 
-%                                end
-                               
-%                                if rand >= TX_Th
-%                                   List_Assigned_STA(ceil(N_RAW*rand), j) = idx_STA(j);                                 
-%                                end
-                               
-                           else
-                                % TX_Prob = TX_LOG(Temp_Idx_TX_LOG,11);
-                              
-%                               if TX_LOG(Temp_Idx_TX_LOG,11) >= rand % TX_Th
-%                                  List_Assigned_STA(ceil(N_RAW*rand), j) = idx_STA(j); 
-%                               end
+                               [~, Temp_Idx_TX_LOG] = min(EuclDist);
+
                            end
-                           
+
                            TX_Prob = TX_LOG(Temp_Idx_TX_LOG,11);
-                           
-                           if Enable_TxWeight 
-                              
-                              % (1) NetCongestionMeasure로 부터 직전 전송 주기에서의 전송
-                              %     성공률 R_suc 계산
-                              
-                              % (2) PrevTxConfing으로 부터, 직전 전송 주기에 사용한
-                              %     Tx_Prob 과 TxWeight을 추출
-                              % (3) R_suc과 Tx_Prob을 비교함
-                              %     (3-1) R_suc <= Tx_Prob --> TxWeight 감소
-                              %     (3-2) R_suc >  Tx_Prob --> TxWeight 증가
-                              % (4) TxWeight이 상한이거나 하한을 벗어나면, 조정
-                              % (5) Tx_Prob 과 TxWeight을 이용하여, 새로운 Tx_Prob으로
-                              %     갱신
-                              % (6) 갱신한 Tx_Prob 과 TxWeight을 PrevTxConfing에 기록
-                              
+                           TxWeight = Init_TxWeight;
+                           PrevTxProb = -1;
+                           PrevTxWeight = -1;
+                           Fallback_R_Suc = NaN;
+
+                           if RAW_Mode == 5 && Enable_AdaptiveFallback && ~Is_ExactMatch_TXLOG
+                               if Mode_Net_Congestion_Measure
+                                   Fallback_R_Suc = Calc_SucRatio(idx_STA(j), Net_Congestion_Measure);
+                               end
+                               if isnan(Fallback_R_Suc)
+                                   Fallback_R_Suc = Fallback_Default_TX_Prob;
+                               end
+
+                               TX_Prob = (1 - Fallback_Weight) * TX_Prob + Fallback_Weight * Fallback_R_Suc;
+                               TX_Prob = min(max(TX_Prob, Fallback_Min_TX_Prob), Fallback_Max_TX_Prob);
+                               Cnt_Fallback(idx_STA(j)) = Cnt_Fallback(idx_STA(j)) + 1;
+                           end
+
+                           if Enable_TxWeight
+
                               [PrevTxProb, PrevTxWeight] = Get_PrevTxConfig(idx_STA(j), Prev_TxConfig);
-                              if PrevTxProb == -1 || PrevTxWeight == -1% -1 means initial state, that is, there is no NetCongestionMeasure for previous period
-                                 % do nothing
-                                 TxWeight = Init_TxWeight;   
+                              if PrevTxProb == -1 || PrevTxWeight == -1 % -1 means initial state, that is, there is no NetCongestionMeasure for previous period
+                                 TxWeight = Init_TxWeight;
                               else
-                                 [R_Suc] = Calc_SucRatio(idx_STA(j), Net_Congestion_Measure);  
-                                 
+                                 if RAW_Mode == 5 && Enable_AdaptiveFallback && ~isnan(Fallback_R_Suc)
+                                    R_Suc = Fallback_R_Suc;
+                                 else
+                                    R_Suc = Calc_SucRatio(idx_STA(j), Net_Congestion_Measure);
+                                 end
+
                                  if R_Suc <= PrevTxProb
                                     TxWeight = TxWeight - Dec_TxWeight;
                                     if TxWeight < Min_TxWeight
-                                       TxWeight = Min_TxWeight; 
+                                       TxWeight = Min_TxWeight;
                                     end
                                  elseif R_Suc > PrevTxProb
                                     TxWeight = TxWeight + Inc_TxWeight;
                                     if TxWeight > Max_TxWeight
-                                       TxWeight = Max_TxWeight; 
+                                       TxWeight = Max_TxWeight;
                                     end
-                                    
-                                 elseif isnan(R_Suc) % 
-                                    % Do nothing 
+
+                                 elseif isnan(R_Suc) %
+                                    % Do nothing
                                     TxWeight = PrevTxWeight;
                                  else
                                      error('unexpected case!\ of the variable R_suc!');
                                  end
                               end
-                              
+
                               TX_Prob = TxWeight*TX_Prob;
-                              [Prev_TxConfig] = Set_PrevTxConfig(idx_STA(j),Prev_TxConfig, TX_Prob, TxWeight);   
-                              
-                              if On_Log_TxWeight
+
+                           end
+
+                           if RAW_Mode == 5 && Enable_TXProb_Smoothing && PrevTxProb ~= -1
+                               TX_Prob = TXProb_Smoothing_Factor*PrevTxProb + (1 - TXProb_Smoothing_Factor)*TX_Prob;
+                           end
+
+                           if RAW_Mode == 5
+                               TX_Prob = min(max(TX_Prob, Fallback_Min_TX_Prob), Fallback_Max_TX_Prob);
+                           end
+
+                           if Enable_TxWeight
+                              [Prev_TxConfig] = Set_PrevTxConfig(idx_STA(j),Prev_TxConfig, TX_Prob, TxWeight);
+                           end
+
+                           if Enable_TxWeight && On_Log_TxWeight
                                   NodeID_Log_TxWeight = find(Target_Node_Log_TxWeight == idx_STA(j));
                                   if i >= Next_Measure_Interval_Log_TxWeight && ~isempty(NodeID_Log_TxWeight)
                                      idx_row = Ptr_EachNodeLog(NodeID_Log_TxWeight); % find(Log_TxWeight(:,1) == i);
                                      idx_col = NodeID_Log_TxWeight*3-2;
                                      Ptr_EachNodeLog(NodeID_Log_TxWeight) = Ptr_EachNodeLog(NodeID_Log_TxWeight) + 1;
-                                     
+
                                      Log_TxWeight(idx_row, idx_col:idx_col+2) = [i TxWeight TX_Prob];
                                      Next_Measure_Interval_Log_TxWeight = Next_Measure_Interval_Log_TxWeight + Measure_Interval_Log_TxWeight;
-                                     
+
                                   end
-                                  
-                                  
-                              end
-                              
-                           else
-                              % do nothing 
+
+
                            end
-                           
-                           if TX_Prob >= rand 
-                               
-                              List_Assigned_STA(ceil(N_RAW*rand), j) = idx_STA(j); 
-                           
+
+                           if TX_Prob >= rand
+
+                              List_Assigned_STA(ceil(N_RAW*rand), j) = idx_STA(j);
+
                            end
-                           
-                           
-                           
+
+
+
                        else
                             %disp('There is no TX_Log!');
                             error('There is no TX_Log!');
 %                             if rand >= TX_Th
-%                                  List_Assigned_STA(ceil(N_RAW*rand), j) = idx_STA(j);  
+%                                  List_Assigned_STA(ceil(N_RAW*rand), j) = idx_STA(j);
 %                             end
 
-                       end 
-                   
+                       end
+
                    end
-               
+
                end
-                            
+
            elseif RAW_Mode == 4
             % allocate STAs for each RAW slot based on uniform random distrubution
               All_User = []; 
@@ -1613,9 +1634,13 @@ avg_loss = mean(n_loss(idx_STA));
 %RESULT_SET = [total_th normalized_th utilization avg_n_access collision_prob2 fairness_index mean(Avg_Delay) mean(Avg_AccessDelay) avg_loss_ratio mean(n_loss) Temp_Solve_Time*T_slot];
 RESULT_SET2 = [total_th normalized_th avg_n_access avg_success_ratio avg_collision_ratio avg_loss_ratio avg_loss mean(Avg_Delay)];
 cnt_empty_delay_measure
-if(RAW_Mode == 3)
+if any(RAW_Mode == [3 5])
     sum(Cnt_NoLog)
     mean(Cnt_NoLog(2:N_Node))
+    if RAW_Mode == 5
+        sum(Cnt_Fallback)
+        mean(Cnt_Fallback(2:N_Node))
+    end
 end
 toc;
 if On_Save_TX_Log
