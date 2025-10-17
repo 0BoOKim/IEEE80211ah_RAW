@@ -159,6 +159,22 @@ AIFSN = ceil(T_difs/T_slot)*ones(1,N_Node);  % AIFSN for EDCA, default = 3 consi
 SIFSN = ceil(T_sifs/T_slot);
 T_ackN = ceil(T_ack/T_slot);
 
+use_cpd = (RAW_Mode == 5);
+if use_cpd
+    %% --- CPD (CUSUM-like) parameters ---
+    CPD.kappa = 0.02;                     % drift parameter for two-sided CUSUM
+    CPD.h = 0.10;                         % detection threshold
+    CPD.g_pos = zeros(1, N_Node);         % positive cumulative sum
+    CPD.g_neg = zeros(1, N_Node);         % negative cumulative sum
+    CPD.prev_s_rate = nan(1, N_Node);     % previous success ratio per node
+    CPD.is_fast = false(1, N_Node);       % FAST(1)/SLOW(0) state flag
+
+    %% --- FAST/SLOW smoothing gains ---
+    CPD.beta.fast = 0.8;                  % aggressive smoothing when FAST state is triggered
+    CPD.beta.slow = 0.2;                  % conservative smoothing when SLOW state is maintained
+    % (tuning points) CPD.kappa, CPD.h, CPD.beta.slow, CPD.beta.fast
+end
+
 
 if N_bkSTA > 0
     
@@ -356,11 +372,11 @@ if RAW_Mode == 2
 
 end
     
-if RAW_Mode == 3  % Proposed
+if RAW_Mode == 3 || RAW_Mode == 5  % Proposed / CPD-enabled variant
     TX_Th = 0.5;  % not used longer
-    
-    Enable_TxWeight = 1; % 
-    
+
+    Enable_TxWeight = 1; %
+
     if Enable_TxWeight
        
         Init_TxWeight = 1.0;  % Weightage Value
@@ -396,7 +412,7 @@ if RAW_Mode == 3  % Proposed
     
     
     Cnt_NoLog = zeros(N_Node,1);
-    
+
     if On_Save_TX_Log == 2
         filename = sprintf('TX_LOG_TEST.mat');
     else
@@ -408,7 +424,7 @@ if RAW_Mode == 3  % Proposed
     Bin_CH_Usage = 0.1000;
     Bin_N_ACK = 5;
     if ~Mode_Net_Congestion_Measure
-        error('RAW_MODE(3) should work with "Mode_Net_Congestion_Measure"!');
+        error('RAW_MODE(3 or 5) should work with "Mode_Net_Congestion_Measure"!');
     end
     
     Norm_TX_LOG = [ TX_LOG(:,1)/max(TX_LOG(:,1)) TX_LOG(:,2)/max(TX_LOG(:,2)) ];
@@ -703,12 +719,12 @@ while(i <= N_slot)
                    end
                end
                
-           elseif RAW_Mode == 3
-              
+           elseif RAW_Mode == 3 || RAW_Mode == 5
+
                List_Assigned_STA = zeros(N_RAW, N_STA);  % initialization, 0: non-assigned STA, 1+: assigned STA's AID
-               
+
                for j = 1:N_STA
-                   
+
                    if( Node.TX_Buffer(idx_STA(j)).Length > 0 )  % only STAs that have buffered frames should access RAWs.
                        
                        if ~isempty(Net_Congestion_Measure(idx_STA(j)).CH_Util)
@@ -746,12 +762,12 @@ while(i <= N_slot)
                            end
                            
                            TX_Prob = TX_LOG(Temp_Idx_TX_LOG,11);
-                           
-                           if Enable_TxWeight 
-                              
+
+                           if Enable_TxWeight
+
                               % (1) NetCongestionMeasure로 부터 직전 전송 주기에서의 전송
                               %     성공률 R_suc 계산
-                              
+
                               % (2) PrevTxConfing으로 부터, 직전 전송 주기에 사용한
                               %     Tx_Prob 과 TxWeight을 추출
                               % (3) R_suc과 Tx_Prob을 비교함
@@ -761,36 +777,50 @@ while(i <= N_slot)
                               % (5) Tx_Prob 과 TxWeight을 이용하여, 새로운 Tx_Prob으로
                               %     갱신
                               % (6) 갱신한 Tx_Prob 과 TxWeight을 PrevTxConfing에 기록
-                              
+
                               [PrevTxProb, PrevTxWeight] = Get_PrevTxConfig(idx_STA(j), Prev_TxConfig);
-                              if PrevTxProb == -1 || PrevTxWeight == -1% -1 means initial state, that is, there is no NetCongestionMeasure for previous period
-                                 % do nothing
-                                 TxWeight = Init_TxWeight;   
-                              else
-                                 [R_Suc] = Calc_SucRatio(idx_STA(j), Net_Congestion_Measure);  
-                                 
-                                 if R_Suc <= PrevTxProb
+                              has_prev_config = ~(PrevTxProb == -1 || PrevTxWeight == -1); % -1 means initial state
+                              TxWeight = Init_TxWeight;
+                              R_Suc = nan;
+
+                              if has_prev_config
+                                 TxWeight = PrevTxWeight;
+                                 [R_Suc] = Calc_SucRatio(idx_STA(j), Net_Congestion_Measure);
+
+                                 if isnan(R_Suc)
+                                    % Do nothing
+                                    TxWeight = PrevTxWeight;
+                                 elseif R_Suc <= PrevTxProb
                                     TxWeight = TxWeight - Dec_TxWeight;
                                     if TxWeight < Min_TxWeight
-                                       TxWeight = Min_TxWeight; 
+                                       TxWeight = Min_TxWeight;
                                     end
                                  elseif R_Suc > PrevTxProb
                                     TxWeight = TxWeight + Inc_TxWeight;
                                     if TxWeight > Max_TxWeight
-                                       TxWeight = Max_TxWeight; 
+                                       TxWeight = Max_TxWeight;
                                     end
-                                    
-                                 elseif isnan(R_Suc) % 
-                                    % Do nothing 
-                                    TxWeight = PrevTxWeight;
                                  else
                                      error('unexpected case!\ of the variable R_suc!');
                                  end
                               end
-                              
+
                               TX_Prob = TxWeight*TX_Prob;
-                              [Prev_TxConfig] = Set_PrevTxConfig(idx_STA(j),Prev_TxConfig, TX_Prob, TxWeight);   
-                              
+
+                              if use_cpd && has_prev_config && ~isnan(R_Suc)
+                                 is_fast_state = CPD.is_fast(idx_STA(j));
+                                 [CPD, is_fast_state] = Update_CPD_State(idx_STA(j), CPD, R_Suc);
+
+                                 beta = CPD.beta.slow;
+                                 if is_fast_state
+                                     beta = CPD.beta.fast;
+                                 end
+                                 TX_Prob = (1 - beta)*PrevTxProb + beta*TX_Prob;
+                                 TX_Prob = min(max(TX_Prob, 0), 1);
+                              end
+
+                              [Prev_TxConfig] = Set_PrevTxConfig(idx_STA(j),Prev_TxConfig, TX_Prob, TxWeight);
+
                               if On_Log_TxWeight
                                   NodeID_Log_TxWeight = find(Target_Node_Log_TxWeight == idx_STA(j));
                                   if i >= Next_Measure_Interval_Log_TxWeight && ~isempty(NodeID_Log_TxWeight)
